@@ -159,6 +159,64 @@
     device: sensor
     state_class: measurement
     device_class: current
+- name: v_dc2
+  description: DC2 Voltage
+  unit: V
+  active: true
+  modbus:
+    register: 3023
+    read_type: register
+    function_code: 4
+    number_of_decimals: 1
+    signed: false
+  homeassistant:
+    device: sensor
+    state_class: measurement
+    device_class: voltage
+
+- name: i_dc2
+  description: DC2 Current
+  unit: A
+  active: true
+  modbus:
+    register: 3024
+    read_type: register
+    function_code: 4
+    number_of_decimals: 1
+    signed: false
+  homeassistant:
+    device: sensor
+    state_class: measurement
+    device_class: current
+
+- name: v_dc3
+  description: DC3 Voltage
+  unit: V
+  active: true
+  modbus:
+    register: 3025
+    read_type: register
+    function_code: 4
+    number_of_decimals: 1
+    signed: false
+  homeassistant:
+    device: sensor
+    state_class: measurement
+    device_class: voltage
+- name: i_dc3
+  description: DC3 Current
+  unit: A
+  active: true
+  modbus:
+    register: 3026
+    read_type: register
+    function_code: 4
+    number_of_decimals: 1
+    signed: false
+  homeassistant:
+    device: sensor
+    state_class: measurement
+    device_class: current
 - name: v_ac
   description: AC Voltage
   unit: V

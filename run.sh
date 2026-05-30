@@ -1,6 +1,6 @@
 #!/bin/bash
 
-SCRIPT_NAME="solis2mqtt.py --service"
+SCRIPT_NAME="alex_solis2mqtt.py --service"
 HEALTH_PROBE="/tmp/ECO_HEALTH"
 
 while true; do
