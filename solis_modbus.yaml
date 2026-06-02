@@ -1,7 +1,7 @@
 - name: active_power
   description: Active Power
   unit: W
-  active: true
+  active: false
   modbus:
     register: 3004
     read_type: long
@@ -14,7 +14,7 @@
 - name: inverter_temp
   description: Inverter temperature
   unit: "°C"
-  active: true
+  active: false
   modbus:
     register: 3041
     read_type: register
@@ -28,7 +28,7 @@
 - name: total_power
   description: Inverter total power generation
   unit: kWh
-  active: true
+  active: false
   modbus:
     register: 3008
     read_type: long
@@ -41,7 +41,7 @@
 - name: generation_today
   description: Energy generated today
   unit: kWh
-  active: true
+  active: false
   modbus:
     register: 3014
     read_type: register
@@ -55,7 +55,7 @@
 - name: generation_yesterday
   description: Energy generated yesterday
   unit: kWh
-  active: true
+  active: false
   modbus:
     register: 3015
     read_type: register
@@ -69,7 +69,7 @@
 - name: total_dc_output_power
   description: Total DC output power
   unit: W
-  active: true
+  active: false
   modbus:
     register: 3006
     read_type: long
@@ -82,7 +82,7 @@
 - name: energy_this_month
   description: Energy generated this month
   unit: kWh
-  active: true
+  active: false
   modbus:
     register: 3010
     read_type: long
@@ -95,7 +95,7 @@
 - name: generation_last_month
   description: Energy generated last month
   unit: kWh
-  active: true
+  active: false
   modbus:
     register: 3012
     read_type: long
@@ -108,7 +108,7 @@
 - name: generation_this_year
   description: Energy generated this year
   unit: kWh
-  active: true
+  active: false
   modbus:
     register: 3016
     read_type: long
@@ -121,7 +121,7 @@
 - name: generation_last_year
   description: Energy generated last year
   unit: kWh
-  active: true
+  active: false
   modbus:
     register: 3018
     read_type: long
@@ -134,7 +134,7 @@
 - name: v_dc1
   description: DC1 Voltage
   unit: V
-  active: true
+  active: false
   modbus:
     register: 3021
     read_type: register
@@ -148,7 +148,7 @@
 - name: i_dc1
   description: DC1 Current
   unit: A
-  active: true
+  active: false
   modbus:
     register: 3022
     read_type: register
@@ -162,7 +162,7 @@
 - name: v_dc2
   description: DC2 Voltage
   unit: V
-  active: true
+  active: false
   modbus:
     register: 3023
     read_type: register
@@ -177,7 +177,7 @@
 - name: i_dc2
   description: DC2 Current
   unit: A
-  active: true
+  active: false
   modbus:
     register: 3024
     read_type: register
@@ -192,7 +192,7 @@
 - name: v_dc3
   description: DC3 Voltage
   unit: V
-  active: true
+  active: false
   modbus:
     register: 3025
     read_type: register
@@ -206,7 +206,7 @@
 - name: i_dc3
   description: DC3 Current
   unit: A
-  active: true
+  active: false
   modbus:
     register: 3026
     read_type: register
@@ -220,7 +220,7 @@
 - name: v_ac
   description: AC Voltage
   unit: V
-  active: true
+  active: false
   modbus:
     register: 3035
     read_type: register
@@ -234,7 +234,7 @@
 - name: i_ac
   description: AC Current
   unit: A
-  active: true
+  active: false
   modbus:
     register: 3038
     read_type: register
@@ -249,7 +249,7 @@
 - name: grid_frequency
   description: Grid Frequency
   unit: Hz
-  active: true
+  active: false
   modbus:
     register: 3042
     read_type: register
@@ -263,7 +263,7 @@
 - name: system_datetime
   description: System DateTime
   unit:
-  active: true
+  active: false
   modbus:
     register: [3072, 3073, 3074, 3075, 3076, 3077] # [year, month, day, hour, minute, seconds]
     read_type: composed_datetime
@@ -321,3 +321,18 @@
     payload_off: 222
     state_class:
     device_class:
+- name: actual_limited_active_power
+  description: Actual Limited Active Power
+  unit: "%"
+  active: true
+  modbus:
+    register: 3049
+    read_type: register
+    function_code: 4
+    signed: false
+    number_of_decimals: 0
+  homeassistant:
+    device: sensor
+    state_class: measurement
+    device_class:
+
