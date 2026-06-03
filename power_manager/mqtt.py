@@ -154,7 +154,7 @@ class Mqtt:
         payload = payload.decode()
         matched = False
         for pattern, callback_info in self.handlers.items():
-            handler_retain = callback_info['retain']
+            handler_retain = callback_info.get('retain',False)
             callback = callback_info['handler_function']
             if self._match_topic(pattern, topic):
                 message_retain = properties['retain']

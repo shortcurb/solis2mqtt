@@ -40,11 +40,27 @@ def write_register(register_id, value):
         signed=False
     )   
     time.sleep(0.5)
-# read and write to 3049 in normal percents (10 = 10%)! confirmed works!
-
-for i in [3049]:
-    value = 10
-    read_register(i)
-    #write_register(i, value)
+"""
+value = 11
+read_register(3049)
+time.sleep(0.5)
+read_register(3151)
+time.sleep(0.5)
+write_register(3151, value)
+time.sleep(0.5)
+read_register(3049)
+time.sleep(0.5)
+read_register(3151)
+time.sleep(0.5)
+"""
+# Write values to 3051 to control!!
+for i in [
+    #3049,
+    #3050, 
+    3051
+    ]:
+    value = 12
+    #read_register(i)
+    write_register(i, value)
     #read_register(i)
     print('\n')

@@ -6,7 +6,6 @@ from datetime import datetime, timezone
 from threading import Lock
 from collections import deque
 
-
 from pysolar.radiation import get_radiation_direct
 from pysolar.solar import get_altitude
 from pysolar.util import get_sunrise_sunset_transit
@@ -19,8 +18,12 @@ from mqtt_discovery import DiscoverMsgNumber, DiscoverMsgSensor, DiscoverMsgSwit
 CONFIG_FILE = "config.yaml"
 SOLIS_MODBUS_CONFIG = "solis_modbus.yaml"
 SUNSET_THRESHOLD = -10
-
-
+VERSION = 2
+"""
+To do:
+Split out specific write and read functions that
+look up register addresses and funciton_codes, etc from the name of the item in solid_modbus.yaml
+"""
 
 
 class Solis2Mqtt:
@@ -36,6 +39,9 @@ class Solis2Mqtt:
         self.string_power = {
 
         } # string1:{last_power_amount:2,'last_power_time':time.time()}
+        self.default_output_power = 10 # Do not update this value, its the default
+        self.changed_output_power = 10 # when you receive a message to solisreaderwest/power_limitation/set, update this value
+        self.changed_output_power_at = time.time()
 
 
     def load_register_cfg(self, register_data_file="solis_modbus.yaml") -> None:
@@ -47,7 +53,6 @@ class Solis2Mqtt:
         now = time.time()
         last_time = self.string_power
 
-
     def generate_ha_discovery_topics(self) -> None:
         for entry in self.register_cfg:
             if entry["active"] and "homeassistant" in entry:
@@ -56,20 +61,16 @@ class Solis2Mqtt:
                     + f"/{self.cfg['inverter']['name']}"
                     + f"/{entry['name']}/config"
                 )
-
-
                 if entry["homeassistant"]["device"] == "sensor":
                     self.mqtt.publish(
                         topic=topic,
-                        # f"homeassistant/sensor/{self.cfg['inverter']['name']}"
-                        # + f"/{entry['name']}/config",
                         payload=str(
                             DiscoverMsgSensor(
                                 entry["description"],
                                 entry["name"],
                                 entry["unit"],
-                                entry["homeassistant"]["device_class"],
-                                entry["homeassistant"]["state_class"],
+                                entry["homeassistant"].get("device_class",''),
+                                entry["homeassistant"].get("state_class",''),
                                 self.cfg["inverter"]["name"],
                                 self.cfg["inverter"]["model"],
                                 self.cfg["inverter"]["manufacturer"],
@@ -81,8 +82,6 @@ class Solis2Mqtt:
                 elif entry["homeassistant"]["device"] == "number":
                     self.mqtt.publish(
                         topic=topic,
-                        # f"homeassistant/number/{self.cfg['inverter']['name']}"
-                        # + f"/{entry['name']}/config",
                         payload=str(
                             DiscoverMsgNumber(
                                 entry["description"],
@@ -118,16 +117,13 @@ class Solis2Mqtt:
                         retain=True,
                     )
 
-
     def subscribe(self) -> None:
         for entry in self.register_cfg:
             if entry["active"] and "write_function_code" in entry["modbus"]:
                 if not self.mqtt.on_message:
                     self.mqtt.on_message = self.on_mqtt_message
-                #  + entry['name'] + "/set")
-                # topic = self.cfg["inverter"]["name"] + "/" + entry["name"] + "/set"
                 topic = f"{self.cfg['inverter']['name']}/{entry['name']}/set"
-                # self.cfg["inverter"]["name"] + "/" + entry["name"] + "/set"
+                #print('subscription topic',topic)
                 self.mqtt.persistent_subscribe(topic)
 
     def read_composed_date(self, register: int, functioncode: int) -> str:
@@ -139,7 +135,59 @@ class Solis2Mqtt:
         second = self.inverter.read_register(register[5], functioncode=functioncode)
         return f"20{year:02d}-{month:02d}-{day:02d}T{hour:02d}:{minute:02d}:{second:02d}"
 
+    def update_power_limitation(self, new_limit):
+        print('update_power_limitation',new_limit)
+        try:
+            new_limit = float(new_limit)
+        except ValueError:
+            print(f'{new_limit} is not floatable')
+            return
+        if new_limit < 0 or new_limit > 100:
+            print(f'{new_limit} outside valid range')
+        self.changed_output_power = new_limit
+        self.changed_output_power_at = time.time()
+
+    def actually_set_power_limitation(self):
+        now = time.time()
+        current_value = self.past_values.get('power_limitation', self.default_output_power)
+        if now - self.changed_output_power_at > 10:
+            write_value = self.default_output_power
+        else:
+            write_value = self.changed_output_power
+        if int(write_value) != int(current_value):
+            print(f'Setting output power to {write_value}')
+            with self.inverter_lock:
+                try:
+                    self.inverter.write_register(
+                        registeraddress=3051,
+                        value=write_value,           
+                        number_of_decimals=2,
+                        functioncode=6,
+                        signed=False
+                    )   
+                    time.sleep(1)
+                except (minimalmodbus.NoResponseError, minimalmodbus.InvalidResponseError):
+                    pass
+                try:
+                    value = self.inverter.read_register(
+                        registeraddress=3051,  
+                        number_of_decimals=2,
+                        functioncode=3,
+                        signed=False
+                    )
+                    print('value',value)
+                    self.past_values['power_limitation'] = value
+                except (minimalmodbus.NoResponseError, minimalmodbus.InvalidResponseError):
+                    pass
+
+
+
+
+
     def on_mqtt_message(self, client, userdata, msg) -> None:
+        if 'power_limitation/set' in msg.topic:
+            self.update_power_limitation(msg.payload.decode('utf-8'))
+            return
         for el in self.register_cfg:
             if el["name"] == msg.topic.split("/")[-2]:
                 register_cfg = el["modbus"]
@@ -161,7 +209,6 @@ class Solis2Mqtt:
                 )
             except (minimalmodbus.NoResponseError, minimalmodbus.InvalidResponseError):
                 pass
-
 
     def main(self):
         date = datetime.now(timezone.utc)
@@ -203,6 +250,7 @@ class Solis2Mqtt:
                             register=entry["modbus"]["register"],
                             functioncode=entry["modbus"]["function_code"],
                         )
+            
             # NoResponseError occurs if inverter is off,
             # InvalidResponseError might happen when inverter is starting up or
             # shutting down during a request
@@ -211,11 +259,7 @@ class Solis2Mqtt:
                 # in case we didn't have a exception before
                 self.inverter_offline = True
 
-                if (
-                    "homeassistant" in entry
-                    and entry["homeassistant"]["state_class"] == "measurement"
-                ):
-
+                if "homeassistant" in entry and entry["homeassistant"]["state_class"] == "measurement":
                     value = None
                 else:
                     continue
@@ -227,7 +271,7 @@ class Solis2Mqtt:
             print(key,value)
             if value is None:
                 continue
-            
+            # Logic to not send 0s or Nones spuriously
             old_value = self.past_values.get(key)
             send_value = None
             if old_value is None:
@@ -236,8 +280,8 @@ class Solis2Mqtt:
                 send_value = value
             self.past_values[key] = value
 
-
-
+            self.actually_set_power_limitation()
+            
             if send_value is not None:
                 self.mqtt.publish(f"{self.cfg['inverter']['name']}/{entry['name']}", send_value, retain=True)
             time.sleep(.5)

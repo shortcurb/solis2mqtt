@@ -139,3 +139,5 @@ class DiscoverMsgSwitch:
 
     def __str__(self):
         return json.dumps(self.discover_msg)
+
+
