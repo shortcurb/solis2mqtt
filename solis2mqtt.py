@@ -1,345 +1,276 @@
-#!/usr/bin/python3
+import asyncio, json, minimalmodbus, datetime, yaml, random, time
 
-import argparse, time, traceback
-import logging
-import os
-from datetime import datetime, timezone
-from logging.handlers import RotatingFileHandler
-from threading import Lock
-
-import minimalmodbus
-import yaml
-from pysolar.radiation import get_radiation_direct
-from pysolar.solar import get_altitude
-from pysolar.util import get_sunrise_sunset_transit
-
-from config import Config
-from inverter import Inverter
+from rolling_window import RollingWindow
 from mqtt import Mqtt
+from inverter import Inverter
+from config import Config
 from mqtt_discovery import DiscoverMsgNumber, DiscoverMsgSensor, DiscoverMsgSwitch
 
-VERSION = "0.8.6"
-CONFIG_FILE = "config.yaml"
-SOLIS_MODBUS_CONFIG = "solis_modbus.yaml"
-SUNSET_THRESHOLD = -10
+"""
+Got it working while the inverter is on. Need to test edge cases like: MQTT disconnected, inverter disconnected, etc
+"""
 
-
-class Solis2Mqtt:
+class ModbusManager:
     def __init__(self):
-        self.cfg = Config("config.yaml")
-        self.register_cfg = ...
-        self.load_register_cfg()
-        self.inverter = Inverter(self.cfg["device"], self.cfg["slave_address"])
-        self.inverter_lock = Lock()
-        self.inverter_offline = False
-        self.mqtt = Mqtt(self.cfg["inverter"]["name"], self.cfg["mqtt"])
-        self.past_values = {} # register_key:previous_value
+        self.class_name = self.__class__.__name__
 
+        self.house_power_window = RollingWindow()
+        self.east_inverter_window = RollingWindow()
+        self.west_inverter_window = RollingWindow()
+
+        self.cfg = Config("config.yaml")
+        self.load_register_cfg()
+        self.inverter_lock = asyncio.Lock()
+
+        self.inverter = Inverter(self.cfg["device"], self.cfg["slave_address"])
+        self.past_values = {} # register_key:[oldest_value, newest_old_value, new_value]
+        self.inverter_online = False
+        self.default_output_power = 10 # Do not update this value, its the default
+        self.changed_output_power = 10 # when you receive a message to solisreaderwest/power_limitation/set, update this value
+        self.changed_output_power_at = time.time()
+
+        self.topics = {
+            f'{self.cfg['inverter']['name']}/power_limitation/set':{'handler_function':self.handle_set_power,'retain':False}
+        }
+
+    async def generate_ha_discovery_topics(self) -> None:
+        await asyncio.sleep(3)
+        while True:
+            for entry in self.register_cfg:
+                if entry["active"] and "homeassistant" in entry:
+                    topic = str(
+                        f"homeassistant/{entry['homeassistant']['device']}"
+                        + f"/{self.cfg['inverter']['name']}"
+                        + f"/{entry['name']}/config"
+                    )
+                    if entry["homeassistant"]["device"] == "sensor":
+                        await self.mqtt.publish_now(
+                            topic=topic,
+                            message=str(
+                                DiscoverMsgSensor(
+                                    entry["description"],
+                                    entry["name"],
+                                    entry["unit"],
+                                    entry["homeassistant"].get("device_class",''),
+                                    entry["homeassistant"].get("state_class",''),
+                                    self.cfg["inverter"]["name"],
+                                    self.cfg["inverter"]["model"],
+                                    self.cfg["inverter"]["manufacturer"],
+                                    1,
+                                )
+                            ),
+                            retain=True,
+                        )
+                    elif entry["homeassistant"]["device"] == "number":
+                        await self.mqtt.publish_now(
+                            topic=topic,
+                            message=str(
+                                DiscoverMsgNumber(
+                                    entry["description"],
+                                    entry["name"],
+                                    entry["homeassistant"]["min"],
+                                    entry["homeassistant"]["max"],
+                                    entry["homeassistant"]["step"],
+                                    self.cfg["inverter"]["name"],
+                                    self.cfg["inverter"]["model"],
+                                    self.cfg["inverter"]["manufacturer"],
+                                    1,
+                                )
+                            ),
+                            retain=True,
+                        )
+                    elif entry["homeassistant"]["device"] == "switch":
+                        await self.mqtt.publish_now(
+                            topic=topic,
+                            # f"homeassistant/switch/{self.cfg['inverter']['name']}"
+                            # + f"/{entry['name']}/config",
+                            message=str(
+                                DiscoverMsgSwitch(
+                                    entry["description"],
+                                    entry["name"],
+                                    entry["homeassistant"]["payload_on"],
+                                    entry["homeassistant"]["payload_off"],
+                                    self.cfg["inverter"]["name"],
+                                    self.cfg["inverter"]["model"],
+                                    self.cfg["inverter"]["manufacturer"],
+                                    1,
+                                )
+                            ),
+                            retain=True,
+                        )
+            await asyncio.sleep(5)
+
+    def read_composed_date(self, registeraddress: int, number_of_decimals: int, functioncode: int, signed: bool) -> str:
+        year = self.inverter.read_register(registeraddress[0], functioncode=functioncode)
+        month = self.inverter.read_register(registeraddress[1], functioncode=functioncode)
+        day = self.inverter.read_register(registeraddress[2], functioncode=functioncode)
+        hour = self.inverter.read_register(registeraddress[3], functioncode=functioncode)
+        minute = self.inverter.read_register(registeraddress[4], functioncode=functioncode)
+        second = self.inverter.read_register(registeraddress[5], functioncode=functioncode)
+        return f"20{year:02d}-{month:02d}-{day:02d}T{hour:02d}:{minute:02d}:{second:02d}"
+
+    async def _interact_modbus(self, method, reg_id, write_value, decimals, function_code):
+        return_value = None
+        async with self.inverter_lock:
+            try:
+                if write_value is None:
+                    args = {
+                        'registeraddress':reg_id,
+                        'number_of_decimals':decimals,
+                        'functioncode':function_code,
+                        'signed':False
+                    }
+                    if method == 'register':
+                        return_value = self.inverter.read_register(**args)  
+                    elif method == 'long':
+                        del args['number_of_decimals']
+                        return_value = self.inverter.read_long(**args) 
+                    elif method == 'composed_datetime':
+                        return_value = self.read_composed_date(**args) 
+                    else:
+                        print('unknown method')
+                else:
+                    self.inverter.write_register(
+                        registeraddress=reg_id,
+                        value=write_value,           
+                        number_of_decimals=decimals,
+                        functioncode=function_code,
+                        signed=False
+                    )      
+                await self.set_inverter_online()
+                return return_value
+            except minimalmodbus.NoResponseError:
+                await self.set_inverter_offline()
+            except (minimalmodbus.InvalidResponseError):
+                print('bad modbus response')
+                await self.set_inverter_offline()
+            return return_value
+
+    async def read_register(self, method, reg_id, decimals, function_code):
+        return_value = await self._interact_modbus(method, reg_id, None, decimals, function_code)
+        return return_value
+
+    async def write_register(self, reg_id, write_value, decimals, function_code):
+        await self._interact_modbus(None, reg_id, write_value, decimals, function_code)
+
+    async def simple_write(self, entry_name, write_value):
+        entry = None
+        for item in self.register_cfg:
+            if item['name'] == entry_name:
+                entry = item
+                break
+        if entry is not None:
+            modbus_info = entry.get('modbus')
+            print(f'writing {write_value} to {entry_name} on register {modbus_info.get('register')}')
+            await self.write_register(
+                modbus_info.get('register'),
+                write_value,
+                modbus_info.get('number_of_decimals'),
+                modbus_info.get('write_function_code')
+            )
+        else:
+            print(f'unknown modbus entry {entry_name}')
+            return False
+
+    async def set_inverter_offline(self):
+        if self.inverter_online:
+            await self.mqtt.publish_now(f'{self.cfg['inverter']['name']}/online', False)
+        self.inverter_online = False
+
+    async def set_inverter_online(self):
+        if not self.inverter_online:
+            await self.mqtt.publish_now(f'{self.cfg['inverter']['name']}/online', True)
+        self.inverter_online = True
 
     def load_register_cfg(self, register_data_file="solis_modbus.yaml") -> None:
         with open(register_data_file) as smfile:
             self.register_cfg = yaml.load(smfile, yaml.Loader)
 
-    def generate_ha_discovery_topics(self) -> None:
-        for entry in self.register_cfg:
-            if entry["active"] and "homeassistant" in entry:
-                topic = str(
-                    f"homeassistant/{entry['homeassistant']['device']}"
-                    + f"/{self.cfg['inverter']['name']}"
-                    + f"/{entry['name']}/config"
-                )
+    async def handle_set_power(self, topic, payload):
+        new_limit = payload
+        print('update_power_limitation',new_limit)
+        try:
+            new_limit = float(new_limit)
+        except ValueError:
+            print(f'{new_limit} is not floatable')
+            return
+        if new_limit < 0 or new_limit > 100:
+            print(f'{new_limit} outside valid range')
+        self.changed_output_power = new_limit
+        self.changed_output_power_at = time.time()
+        print(topic, payload)
 
-                # logging.info("HA topic: %s", topic)
-
-                if entry["homeassistant"]["device"] == "sensor":
-                    logging.info("Generating discovery topic for sensor: %s", entry["name"])
-                    self.mqtt.publish(
-                        topic=topic,
-                        # f"homeassistant/sensor/{self.cfg['inverter']['name']}"
-                        # + f"/{entry['name']}/config",
-                        payload=str(
-                            DiscoverMsgSensor(
-                                entry["description"],
-                                entry["name"],
-                                entry["unit"],
-                                entry["homeassistant"]["device_class"],
-                                entry["homeassistant"]["state_class"],
-                                self.cfg["inverter"]["name"],
-                                self.cfg["inverter"]["model"],
-                                self.cfg["inverter"]["manufacturer"],
-                                VERSION,
-                            )
-                        ),
-                        retain=True,
-                    )
-                elif entry["homeassistant"]["device"] == "number":
-                    logging.info("Generating discovery topic for number: " + entry["name"])
-                    self.mqtt.publish(
-                        topic=topic,
-                        # f"homeassistant/number/{self.cfg['inverter']['name']}"
-                        # + f"/{entry['name']}/config",
-                        payload=str(
-                            DiscoverMsgNumber(
-                                entry["description"],
-                                entry["name"],
-                                entry["homeassistant"]["min"],
-                                entry["homeassistant"]["max"],
-                                entry["homeassistant"]["step"],
-                                self.cfg["inverter"]["name"],
-                                self.cfg["inverter"]["model"],
-                                self.cfg["inverter"]["manufacturer"],
-                                VERSION,
-                            )
-                        ),
-                        retain=True,
-                    )
-                elif entry["homeassistant"]["device"] == "switch":
-                    logging.info("Generating discovery topic for switch: %s", entry["name"])
-                    self.mqtt.publish(
-                        topic=topic,
-                        # f"homeassistant/switch/{self.cfg['inverter']['name']}"
-                        # + f"/{entry['name']}/config",
-                        payload=str(
-                            DiscoverMsgSwitch(
-                                entry["description"],
-                                entry["name"],
-                                entry["homeassistant"]["payload_on"],
-                                entry["homeassistant"]["payload_off"],
-                                self.cfg["inverter"]["name"],
-                                self.cfg["inverter"]["model"],
-                                self.cfg["inverter"]["manufacturer"],
-                                VERSION,
-                            )
-                        ),
-                        retain=True,
-                    )
-                else:
-                    logging.error(
-                        "Unknown homeassistant device type: %s",
-                        entry["homeassistant"]["device"],
-                    )
-
-    def subscribe(self) -> None:
-        for entry in self.register_cfg:
-            if entry["active"] and "write_function_code" in entry["modbus"]:
-                if not self.mqtt.on_message:
-                    self.mqtt.on_message = self.on_mqtt_message
-                # logging.info("Subscribing to: " + self.cfg['inverter']['name'] + "/"
-                #  + entry['name'] + "/set")
-                # topic = self.cfg["inverter"]["name"] + "/" + entry["name"] + "/set"
-                topic = f"{self.cfg['inverter']['name']}/{entry['name']}/set"
-                logging.info("Subscribing to topic: %s", topic)
-                # self.cfg["inverter"]["name"] + "/" + entry["name"] + "/set"
-                self.mqtt.persistent_subscribe(topic)
-
-    def read_composed_date(self, register: int, functioncode: int) -> str:
-        year = self.inverter.read_register(register[0], functioncode=functioncode)
-        month = self.inverter.read_register(register[1], functioncode=functioncode)
-        day = self.inverter.read_register(register[2], functioncode=functioncode)
-        hour = self.inverter.read_register(register[3], functioncode=functioncode)
-        minute = self.inverter.read_register(register[4], functioncode=functioncode)
-        second = self.inverter.read_register(register[5], functioncode=functioncode)
-        return f"20{year:02d}-{month:02d}-{day:02d}T{hour:02d}:{minute:02d}:{second:02d}"
-
-    def on_mqtt_message(self, client, userdata, msg) -> None:
-        for el in self.register_cfg:
-            if el["name"] == msg.topic.split("/")[-2]:
-                register_cfg = el["modbus"]
-                break
-
-        str_value = msg.payload.decode("utf-8")
-        if "number_of_decimals" in register_cfg and register_cfg["number_of_decimals"] > 0:
-            value = float(str_value)
-        else:
-            value = int(str_value)
-        with self.inverter_lock:
-            try:
-                self.inverter.write_register(
-                    register_cfg["register"],
-                    value,
-                    register_cfg["number_of_decimals"],
-                    register_cfg["write_function_code"],
-                    register_cfg["signed"],
-                )
-            except (minimalmodbus.NoResponseError, minimalmodbus.InvalidResponseError):
-                if not self.inverter_offline:
-                    logging.exception(
-                        f"Error while writing message to inverter. Topic: '{msg.topic}, "
-                        f"Value: '{str_value}', Register: '{register_cfg['register']}'."
-                    )
-
-    def main(self) -> int:
-        date = datetime.now(timezone.utc)
-        logging.info("Latitude: %s, longitude: %s", self.cfg["latitude"], self.cfg["longitude"])
-        solar_altitude = get_altitude(self.cfg["latitude"], self.cfg["longitude"], date)
-        sunrise, sunset, sunhigh = get_sunrise_sunset_transit(
-            latitude_deg=self.cfg["latitude"], longitude_deg=self.cfg["longitude"], when=date
-        )
-        solar_radiation_direct = get_radiation_direct(date, solar_altitude)
-
-        logging.info(
-            "Solar position %s, radiation direct: %s",
-            solar_altitude,
-            solar_radiation_direct,
-        )
-        logging.info("Sunrise: %s", sunrise.isoformat())
-        logging.info("Sunhigh: %s", sunhigh.isoformat())
-        logging.info("Sunset : %s", sunset.isoformat())
-
-        if solar_altitude < SUNSET_THRESHOLD:
-            return 4
-
-        self.generate_ha_discovery_topics()
-        self.subscribe()
-
-        logging.debug("Inverter scan start at %s", datetime.now().isoformat())
-        for entry in self.register_cfg:
-            if not entry["active"] or "function_code" not in entry["modbus"]:
-                continue
-
-            try:
-                if entry["modbus"]["read_type"] == "register":
-                    with self.inverter_lock:
-                        value = self.inverter.read_register(
-                            registeraddress=entry["modbus"]["register"],
-                            number_of_decimals=entry["modbus"]["number_of_decimals"],
-                            functioncode=entry["modbus"]["function_code"],
-                            signed=entry["modbus"]["signed"],
-                        )
-
-                elif entry["modbus"]["read_type"] == "long":
-                    with self.inverter_lock:
-                        value = self.inverter.read_long(
-                            registeraddress=entry["modbus"]["register"],
-                            functioncode=entry["modbus"]["function_code"],
-                            signed=entry["modbus"]["signed"],
-                        )
-
-                elif entry["modbus"]["read_type"] == "composed_datetime":
-                    with self.inverter_lock:
-                        value = self.read_composed_date(
-                            register=entry["modbus"]["register"],
-                            functioncode=entry["modbus"]["function_code"],
-                        )
-            # NoResponseError occurs if inverter is off,
-            # InvalidResponseError might happen when inverter is starting up or
-            # shutting down during a request
-            except (minimalmodbus.NoResponseError, minimalmodbus.InvalidResponseError):
-
-                # in case we didn't have a exception before
-                logging.info("Inverter not reachable for %s", entry["name"])
-                self.inverter_offline = True
-
-                if (
-                    "homeassistant" in entry
-                    and entry["homeassistant"]["state_class"] == "measurement"
-                ):
-
-                    value = 0
-                else:
-                    continue
-            else:
-                self.inverter_offline = False
-                logging.info(
-                    "Read %s - %s %s",
-                    entry["description"],
-                    value,
-                    entry["unit"] if entry["unit"] else "",
-                )
-            
-            key = entry['name']
-            self.past_values.setdefault(key, 0)
-            past_value = self.past_values[key]
-            if value != 0:
-                send_value = value
-                self.past_values[key] = value
-            else: # if current value is 0
-                if past_value == 0:
-                    send_value = 0
-                else:
-                    send_value = past_value
-
-
-            print('key',key,'past value',self.past_values[key],'new value',send_value)
-
-            self.mqtt.publish(f"{self.cfg['inverter']['name']}/{entry['name']}", send_value, retain=True)
-
-        # if self.inverter_offline:
-        #     return_value = 3 if solar_altitude > 0 else 2
-        # else:
-        #     return_value = 0
-
-        # return_value = 0 if not self.inverter_offline else 3 if solar_altitude > 0 else 2
-
-        return 0 if not self.inverter_offline else 2 if solar_altitude < 0 else 3
-        # return return_value
-        # return 3 if self.inverter_offline and solar_altitude > 0 else 0
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Solis inverter to mqtt bridge.")
-    parser.add_argument("-v", "--verbose", action="store_true", help="verbose logging")
-    parser.add_argument("-s", "--service", action="store_true", help="run as service")
-    args = parser.parse_args()
-
-    log_level = logging.DEBUG if args.verbose else logging.INFO
-    rotating_handler = RotatingFileHandler(
-        filename=os.path.splitext(os.path.basename(__file__))[0] + ".log",
-        maxBytes=1024 * 1024 * 10,
-        backupCount=5,
-    )
-    log_handlers = [rotating_handler]
-
-    if args.service:
-        # add loggging to: journalctl -u solis2mqtt.service
-        log_handlers.append(logging.StreamHandler())
-        log_format = (
-            "%(levelname)s (%(filename)s, %(funcName)s(), line %(lineno)d) "
-            + "- %(name)s - %(message)s"
-        )
-    else:
-        log_format = (
-            "%(asctime)s %(levelname)s (%(filename)s, %(funcName)s(), line %(lineno)d) "
-            + "- %(name)s - %(message)s"
-        )
-
-    logging.basicConfig(
-        level=log_level,
-        format=log_format,
-        handlers=log_handlers,
-    )
-    logging.info(
-        "Starting up, version: %s, service: %s, debug: %s",
-        VERSION,
-        args.service,
-        args.verbose,
-    )
-
-    try:
-        s2m = Solis2Mqtt()
+    async def power_limitation_worker(self):
+        await asyncio.sleep(1)
+        await self.simple_write('power_limitation',self.default_output_power)
         while True:
-            exit_value = s2m.main()
-            time.sleep(5)
-    except Exception:
-        traceback.print_exc()
-        logging.error("Main exception", exc_info=True)
-        exit(1)
+            now = time.time()
+            current_value = self.past_values.get('power_limitation', self.default_output_power)
+            if now - self.changed_output_power_at > 10:
+                write_value = self.default_output_power
+            else:
+                write_value = self.changed_output_power
 
-    if exit_value == 4:
-        logging.info(
-            "Sun is down more than %s degree%s, so wait long, exit(%s)",
-            SUNSET_THRESHOLD,
-            "" if abs(SUNSET_THRESHOLD) == 1 else "s",
-            exit_value
-        )
-    elif exit_value == 3:
-        logging.info("Inverter unreachable and sun is up, exit(%s)", exit_value)
-    elif exit_value == 2:
-        logging.info(
-            "Inverter unreachable and sun is down, exit(%s)",
-            exit_value,
-        )
-    else:
-        logging.info("Normal operation, exit(%s)", exit_value)
+            if int(write_value) != int(current_value):
+                print('writing', write_value)
+                await self.simple_write('power_limitation',write_value)
+                await asyncio.sleep(3) # sleep 3s for the write to complete and new values to be read
+            await asyncio.sleep(0.1)
 
-    exit(exit_value)
+    async def dedupe_values(self, name, value):
+        send_value = None
+        if value is  None:
+            return send_value
+        # Logic to not send 0s or Nones spuriously
+        old_value = self.past_values.get(name)
+        send_value = None
+        if old_value is None:
+            send_value = value
+        elif old_value != value:
+            send_value = value
+        self.past_values[name] = value
+        return send_value
+
+    async def polling_worker(self, entry):
+        await asyncio.sleep(3)
+        frequency = entry.get('polling_frequency',120)
+        variation = entry.get('polling_variation',15)
+        while True:
+            modbus_info = entry.get('modbus')
+            response_value = await self.read_register(modbus_info.get('read_type'),modbus_info.get('register'), modbus_info.get('number_of_decimals', 1), modbus_info.get('function_code'))
+            if entry.get('dedupe', True):
+                send_value = await self.dedupe_values(entry.get('name'), response_value)
+            else:
+                send_value = response_value
+            if send_value is not None:
+                await self.mqtt.publish_now(f"{self.cfg['inverter']['name']}/{entry['name']}", send_value, retain=False)
+
+            if variation:
+                wait_time = frequency + random.randint(-1*int(variation/2), int(variation/2))
+            else:
+                wait_time = round(frequency + random.randint(-10, 10)/100,2)
+            #print(entry.get('name'),wait_time, response_value)
+            await asyncio.sleep(wait_time)
+
+    async def create_reading_tasks(self):
+        for entry in self.register_cfg:
+            if entry.get("active",False):
+                self.reading_tasks.append(self.polling_worker(entry))
+        print(f'Created {len(self.reading_tasks)} reading tasks')
+
+    async def run(self):
+
+        self.mqtt = Mqtt(self.class_name, self.topics, max_worker_count = 10)
+        self.reading_tasks = [
+            self.mqtt.listener(),
+            self.power_limitation_worker(),
+            self.generate_ha_discovery_topics()
+        ]
+        await self.create_reading_tasks()
+        await asyncio.gather(*self.reading_tasks),
+
+
+
+
+mm = ModbusManager()
+asyncio.run(mm.run())
