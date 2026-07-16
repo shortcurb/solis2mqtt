@@ -45,6 +45,8 @@ class DiscoverMsgSensor:
         self.discover_msg["device"]["model"] = device_model
         self.discover_msg["device"]["manufacturer"] = device_manufacturer
         self.discover_msg["device"]["sw_version"] += str(version)
+        if self.discover_msg['device_class'] is None or self.discover_msg['device_class'] == '':
+            del self.discover_msg['device_class']
 
     def __str__(self):
         return json.dumps(self.discover_msg)

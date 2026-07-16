@@ -25,12 +25,13 @@ class ModbusManager:
         self.inverter = Inverter(self.cfg["device"], self.cfg["slave_address"])
         self.past_values = {} # register_key:[oldest_value, newest_old_value, new_value]
         self.inverter_online = False
-        self.default_output_power = 10 # Do not update this value, its the default
+        self.default_output_power = 8 # Do not update this value, its the default
         self.changed_output_power = 10 # when you receive a message to solisreaderwest/power_limitation/set, update this value
         self.changed_output_power_at = time.time()
+        self.data_topic = 'sagehouse/electric/solar/shed_roof/{field_name}'
 
         self.topics = {
-            f'{self.cfg['inverter']['name']}/power_limitation/set':{'handler_function':self.handle_set_power,'retain':False}
+            'sagehouse/electric/management/shed_roof/power_limitation/set':{'handler_function':self.handle_set_power,'retain':False}
         }
 
     async def generate_ha_discovery_topics(self) -> None:
@@ -172,6 +173,25 @@ class ModbusManager:
             print(f'unknown modbus entry {entry_name}')
             return False
 
+    async def simple_read(self, entry_name):
+        entry = None
+        for item in self.register_cfg:
+            if item['name'] == entry_name:
+                entry = item
+                break
+        if entry is not None:
+            modbus_info = entry.get('modbus')
+            response = await self.read_register(
+                modbus_info.get('read_type'),
+                modbus_info.get('register'),
+                modbus_info.get('number_of_decimals'),
+                modbus_info.get('function_code')
+            )
+            return response
+        else:
+            print(f'unknown modbus entry {entry_name}')
+            return False
+        
     async def set_inverter_offline(self):
         if self.inverter_online:
             await self.mqtt.publish_now(f'{self.cfg['inverter']['name']}/online', False)
@@ -201,20 +221,22 @@ class ModbusManager:
         print(topic, payload)
 
     async def power_limitation_worker(self):
-        await asyncio.sleep(1)
+        await asyncio.sleep(3)
         await self.simple_write('power_limitation',self.default_output_power)
+        await asyncio.sleep(0.5)
+        self.past_values['power_limitation'] = await self.simple_read('power_limitation')
         while True:
             now = time.time()
-            current_value = self.past_values.get('power_limitation', self.default_output_power)
+            current_value = self.past_values.get('power_limitation', None)
             if now - self.changed_output_power_at > 10:
                 write_value = self.default_output_power
             else:
                 write_value = self.changed_output_power
-
+            if current_value is None:
+                current_value = 0
             if int(write_value) != int(current_value):
-                print('writing', write_value)
                 await self.simple_write('power_limitation',write_value)
-                await asyncio.sleep(3) # sleep 3s for the write to complete and new values to be read
+                await asyncio.sleep(5) # sleep 5s for the write to complete and new values to be read
             await asyncio.sleep(0.1)
 
     async def dedupe_values(self, name, value):
@@ -236,20 +258,25 @@ class ModbusManager:
         frequency = entry.get('polling_frequency',120)
         variation = entry.get('polling_variation',15)
         while True:
+            send_value = None
             modbus_info = entry.get('modbus')
             response_value = await self.read_register(modbus_info.get('read_type'),modbus_info.get('register'), modbus_info.get('number_of_decimals', 1), modbus_info.get('function_code'))
             if entry.get('dedupe', True):
                 send_value = await self.dedupe_values(entry.get('name'), response_value)
             else:
                 send_value = response_value
-            if send_value is not None:
-                await self.mqtt.publish_now(f"{self.cfg['inverter']['name']}/{entry['name']}", send_value, retain=False)
 
+            if send_value is not None:
+                self.past_values[entry.get('name')] = send_value
+                #await self.mqtt.publish_now(f"{self.cfg['inverter']['name']}/{entry['name']}", send_value, retain=False)
+                await self.mqtt.publish_now(self.data_topic.format(field_name = entry['name']), send_value, retain = False)
+                print(self.data_topic.format(field_name = entry['name']), send_value)
             if variation:
                 wait_time = frequency + random.randint(-1*int(variation/2), int(variation/2))
             else:
                 wait_time = round(frequency + random.randint(-10, 10)/100,2)
-            #print(entry.get('name'),wait_time, response_value)
+            #if entry.get('name') == 'power_limitation':
+                #print(entry.get('name'),wait_time, response_value)
             await asyncio.sleep(wait_time)
 
     async def create_reading_tasks(self):
@@ -259,7 +286,6 @@ class ModbusManager:
         print(f'Created {len(self.reading_tasks)} reading tasks')
 
     async def run(self):
-
         self.mqtt = Mqtt(self.class_name, self.topics, max_worker_count = 10)
         self.reading_tasks = [
             self.mqtt.listener(),
