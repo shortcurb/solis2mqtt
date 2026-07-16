@@ -28,10 +28,12 @@ class ModbusManager:
         self.default_output_power = 8 # Do not update this value, its the default
         self.changed_output_power = 10 # when you receive a message to solisreaderwest/power_limitation/set, update this value
         self.changed_output_power_at = time.time()
-        self.data_topic = 'sagehouse/electric/solar/shed_roof/{field_name}'
+        self.data_topic = 'sagehouse/electric/solar/{inverter_name}/{field_name}'
+        self.inverter_name = self.cfg['inverter']['name']
+
 
         self.topics = {
-            'sagehouse/electric/management/shed_roof/power_limitation/set':{'handler_function':self.handle_set_power,'retain':False}
+            f'sagehouse/electric/management/{self.inverter_name}/power_limitation/set':{'handler_function':self.handle_set_power,'retain':False}
         }
 
     async def generate_ha_discovery_topics(self) -> None:
@@ -162,7 +164,7 @@ class ModbusManager:
                 break
         if entry is not None:
             modbus_info = entry.get('modbus')
-            print(f'writing {write_value} to {entry_name} on register {modbus_info.get('register')}')
+            #print(f'writing {write_value} to {entry_name} on register {modbus_info.get('register')}')
             await self.write_register(
                 modbus_info.get('register'),
                 write_value,
@@ -194,12 +196,14 @@ class ModbusManager:
         
     async def set_inverter_offline(self):
         if self.inverter_online:
-            await self.mqtt.publish_now(f'{self.cfg['inverter']['name']}/online', False)
+            await self.mqtt.publish_now(self.data_topic.format(inverter_name = self.inverter_name, field_name = 'online'), False)
+            #await self.mqtt.publish_now(f'{self.cfg['inverter']['name']}/online', False)
         self.inverter_online = False
 
     async def set_inverter_online(self):
         if not self.inverter_online:
-            await self.mqtt.publish_now(f'{self.cfg['inverter']['name']}/online', True)
+            await self.mqtt.publish_now(self.data_topic.format(inverter_name = self.inverter_name, field_name = 'online'), True)
+            #await self.mqtt.publish_now(f'{self.cfg['inverter']['name']}/online', True)
         self.inverter_online = True
 
     def load_register_cfg(self, register_data_file="solis_modbus.yaml") -> None:
@@ -269,8 +273,7 @@ class ModbusManager:
             if send_value is not None:
                 self.past_values[entry.get('name')] = send_value
                 #await self.mqtt.publish_now(f"{self.cfg['inverter']['name']}/{entry['name']}", send_value, retain=False)
-                await self.mqtt.publish_now(self.data_topic.format(field_name = entry['name']), send_value, retain = False)
-                print(self.data_topic.format(field_name = entry['name']), send_value)
+                await self.mqtt.publish_now(self.data_topic.format(inverter_name = self.inverter_name, field_name = entry['name']), send_value, retain = False)
             if variation:
                 wait_time = frequency + random.randint(-1*int(variation/2), int(variation/2))
             else:
