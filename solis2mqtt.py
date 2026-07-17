@@ -30,6 +30,7 @@ class ModbusManager:
         self.changed_output_power_at = time.time()
         self.data_topic = 'sagehouse/electric/solar/{inverter_name}/{field_name}'
         self.inverter_name = self.cfg['inverter']['name']
+        self.power_limitation_active = self.cfg['inverter']['power_limiting']
 
 
         self.topics = {
@@ -115,6 +116,7 @@ class ModbusManager:
     async def _interact_modbus(self, method, reg_id, write_value, decimals, function_code):
         return_value = None
         async with self.inverter_lock:
+            #print('reg_id', reg_id, 'method',method, 'write_value',write_value, 'decimals',decimals, 'function_code',function_code)
             try:
                 if write_value is None:
                     args = {
@@ -139,10 +141,12 @@ class ModbusManager:
                         number_of_decimals=decimals,
                         functioncode=function_code,
                         signed=False
-                    )      
+                    )     
                 await self.set_inverter_online()
+                #print('reg_id',reg_id,'return_value',return_value)
                 return return_value
             except minimalmodbus.NoResponseError:
+                print('no modbus response')
                 await self.set_inverter_offline()
             except (minimalmodbus.InvalidResponseError):
                 print('bad modbus response')
@@ -211,6 +215,8 @@ class ModbusManager:
             self.register_cfg = yaml.load(smfile, yaml.Loader)
 
     async def handle_set_power(self, topic, payload):
+        if not self.power_limitation_active:
+            return
         new_limit = payload
         print('update_power_limitation',new_limit)
         try:
@@ -226,6 +232,9 @@ class ModbusManager:
 
     async def power_limitation_worker(self):
         await asyncio.sleep(3)
+        if not self.power_limitation_active:
+            await self.simple_write('power_limitation', 100)
+            return
         await self.simple_write('power_limitation',self.default_output_power)
         await asyncio.sleep(0.5)
         self.past_values['power_limitation'] = await self.simple_read('power_limitation')

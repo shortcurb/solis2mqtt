@@ -2,9 +2,6 @@
   description: Active Power
   unit: W
   active: true
-  polling_frequency: 1
-  polling_variation: 0
-  dedupe: false
   modbus:
     register: 3004
     read_type: long
@@ -31,7 +28,7 @@
 - name: total_power
   description: Inverter total power generation
   unit: kWh
-  active: false
+  active: true
   modbus:
     register: 3008
     read_type: long
@@ -72,7 +69,7 @@
 - name: total_dc_output_power
   description: Total DC output power
   unit: W
-  active: false
+  active: true
   modbus:
     register: 3006
     read_type: long
@@ -85,7 +82,7 @@
 - name: energy_this_month
   description: Energy generated this month
   unit: kWh
-  active: false
+  active: true
   modbus:
     register: 3010
     read_type: long
@@ -98,7 +95,7 @@
 - name: generation_last_month
   description: Energy generated last month
   unit: kWh
-  active: false
+  active: true
   modbus:
     register: 3012
     read_type: long
@@ -111,7 +108,7 @@
 - name: generation_this_year
   description: Energy generated this year
   unit: kWh
-  active: false
+  active: true
   modbus:
     register: 3016
     read_type: long
@@ -124,7 +121,7 @@
 - name: generation_last_year
   description: Energy generated last year
   unit: kWh
-  active: false
+  active: true
   modbus:
     register: 3018
     read_type: long
@@ -223,7 +220,7 @@
 - name: v_ac
   description: AC Voltage
   unit: V
-  active: false
+  active: true
   modbus:
     register: 3035
     read_type: register
@@ -237,7 +234,7 @@
 - name: i_ac
   description: AC Current
   unit: A
-  active: false
+  active: true
   modbus:
     register: 3038
     read_type: register
@@ -252,7 +249,7 @@
 - name: grid_frequency
   description: Grid Frequency
   unit: Hz
-  active: false
+  active: true
   modbus:
     register: 3042
     read_type: register
@@ -292,10 +289,7 @@
 - name: power_limitation
   description: Power limitation
   unit: "%"
-  active: true
-  polling_frequency: 30
-  polling_variation: 0
-  dedupe: false
+  active: false
   modbus:
     register: 3051
     read_type: register
@@ -325,19 +319,5 @@
     device: switch
     payload_on: 190
     payload_off: 222
-- name: actual_limited_active_power
-  description: Actual Limited Active Power
-  unit: "%"
-  active: false
-  polling_frequency: 2
-  polling_variation: 0
-  modbus:
-    register: 3049
-    read_type: register
-    function_code: 4
-    signed: false
-    number_of_decimals: 2
-  homeassistant:
-    device: sensor
-    state_class: measurement
-
+    state_class:
+    device_class:

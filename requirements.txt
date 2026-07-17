@@ -2,3 +2,5 @@ minimalmodbus
 pyyaml
 paho-mqtt
 pysolar
+gmqtt
+python-dotenv
