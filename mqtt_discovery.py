@@ -36,7 +36,8 @@ class DiscoverMsgSensor:
     ):
         self.discover_msg = deepcopy(DiscoverMsgSensor.DISCOVERY_MSG)
         self.discover_msg["name"] = name
-        self.discover_msg["state_topic"] = device_name + "/" + id
+        #self.discover_msg["state_topic"] = device_name + "/" + id
+        self.discover_msg["state_topic"] = f'sagehouse/electric/solar/{device_name}/{id}'
         self.discover_msg["unique_id"] = device_name + "/" + id
         self.discover_msg["device_class"] = device_class
         self.discover_msg["state_class"] = state_class

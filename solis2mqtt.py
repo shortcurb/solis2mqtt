@@ -218,7 +218,6 @@ class ModbusManager:
         if not self.power_limitation_active:
             return
         new_limit = payload
-        print('update_power_limitation',new_limit)
         try:
             new_limit = float(new_limit)
         except ValueError:
@@ -228,7 +227,6 @@ class ModbusManager:
             print(f'{new_limit} outside valid range')
         self.changed_output_power = new_limit
         self.changed_output_power_at = time.time()
-        print(topic, payload)
 
     async def power_limitation_worker(self):
         await asyncio.sleep(3)
